@@ -21,13 +21,13 @@ const FUNCTION_DECLARATIONS = [
   {
     name: "save_health_plan",
     description:
-      "Saves the personalized health, skin, and diet plan. Call this when the user asks for their treatment guide or plan.",
+      "Saves the personalized health and diet plan. Call this when the user asks for their treatment guide or nutritional plan.",
     parameters: {
       type: Type.OBJECT,
       properties: {
-        skinCondition: {
+        healthSummary: {
           type: Type.STRING,
-          description: "Summary of skin condition",
+          description: "Summary of overall health and nutritional status",
         },
         dietaryNotes: {
           type: Type.STRING,
@@ -42,7 +42,7 @@ const FUNCTION_DECLARATIONS = [
         recommendedMedication: { type: Type.STRING },
       },
       required: [
-        "skinCondition",
+        "healthSummary",
         "dietaryNotes",
         "morningRoutineTitle",
         "morningRoutineDesc",
@@ -101,6 +101,7 @@ function sendToClient(ws: WebSocket, msg: ServerMessage) {
 export class GeminiSession {
   private ws: WebSocket;
   private session: any = null;
+  private isClosed = false;
 
   constructor(ws: WebSocket) {
     this.ws = ws;
@@ -112,7 +113,10 @@ export class GeminiSession {
 
     const ai = new GoogleGenAI({ apiKey });
 
-    const systemInstruction = `You are Dr. Moriesly, an empathetic AI health and dermatology expert. You can see the user through the camera. Ask about their skin, and what food or drinks they consumed today. If they show you food, estimate its nutrition. Keep your responses concise and natural.
+    const systemInstruction = `You are an empathetic AI nutritional and health expert. You can see the user through the camera. Ask about their food or drinks they consumed today and their overall health. If they show you food, estimate its nutrition. Keep your responses concise and natural.
+
+IMPORTANT: You MUST ALWAYS speak in English consistently. Do not mix languages.
+CRITICAL: Deliver your response completely in one turn without trailing off. Do NOT repeat or echo your own responses.
 
 The user has logged the following meals recently:
 ${mealLogs || "No meals logged yet."}
@@ -124,6 +128,11 @@ When the user asks for their treatment plan or guide, you MUST call the 'save_he
       model: "gemini-2.5-flash-native-audio-preview-09-2025",
       config: {
         responseModalities: [Modality.AUDIO],
+        realtimeInputConfig: {
+          automaticActivityDetection: {
+            silenceDurationMs: 2000,
+          },
+        },
         speechConfig: {
           voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } },
         },
@@ -137,7 +146,7 @@ When the user asks for their treatment plan or guide, you MUST call the 'save_he
           sendToClient(this.ws, {
             type: "status",
             status: "LISTENING",
-            text: "I am analyzing your skin... Tell me, does it itch or feel dry? What did you eat today?",
+            text: "I am analyzing your health... Tell me, how are you feeling today? What did you eat?",
           });
         },
 
@@ -145,7 +154,18 @@ When the user asks for their treatment plan or guide, you MUST call the 'save_he
           // ── Audio response ─────────────────────────────────────────────────
           const base64Audio =
             message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
-          if (base64Audio) {
+
+          // ── Text/Box response ──────────────────────────────────────────────
+          const textData = message.serverContent?.modelTurn?.parts?.[0]?.text;
+
+          if (textData) {
+            // Kita gunakan channel status text untuk meneruskan text/koordinat dari genai
+            sendToClient(this.ws, {
+              type: "status",
+              status: "SPEAKING",
+              text: textData,
+            });
+          } else if (base64Audio) {
             sendToClient(this.ws, { type: "ai_audio", data: base64Audio });
             sendToClient(this.ws, {
               type: "status",
@@ -211,6 +231,10 @@ When the user asks for their treatment plan or guide, you MUST call the 'save_he
     });
 
     this.session = await sessionPromise;
+    if (this.isClosed) {
+      this.session.close();
+      return;
+    }
     console.log("[Gemini] Session established");
   }
 
@@ -231,6 +255,7 @@ When the user asks for their treatment plan or guide, you MUST call the 'save_he
   }
 
   close() {
+    this.isClosed = true;
     try {
       this.session?.close();
     } catch {

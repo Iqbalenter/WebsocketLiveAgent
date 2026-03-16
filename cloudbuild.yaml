@@ -1,0 +1,105 @@
+# ============================================================
+# Cloud Build - moriesly-autocare-server
+# Build & Push via Docker, Deploy ke Cloud Run
+# ============================================================
+# Substitution variables diisi di Cloud Build Trigger:
+#   _REGION                : GCP region (e.g. asia-southeast2)
+#   _ARTIFACT_REGISTRY_REPO: Nama Artifact Registry repo (e.g. moriesly)
+#   _SERVICE_NAME          : Nama Cloud Run service (e.g. moriesly-autocare-server)
+#   _MEMORY                : Memory Cloud Run (e.g. 512Mi)
+#   _CPU                   : CPU Cloud Run (e.g. 1)
+#   _MIN_INSTANCES         : Min instances Cloud Run (e.g. 0)
+#   _MAX_INSTANCES         : Max instances Cloud Run (e.g. 3)
+#   _PORT                  : Port aplikasi (e.g. 8080)
+#   _NODE_ENV              : Node environment (e.g. production)
+#   _GEMINI_API_KEY        : Gemini API key
+#   _FRONTEND_URLS         : CORS origins dipisah koma (e.g. https://moriesly.com,https://www.moriesly.com)
+#
+# CATATAN:
+#   - Server ini menggunakan WebSocket untuk streaming audio/video ke Gemini Live API.
+#     Timeout di-set ke 3600 detik (maksimum Cloud Run) agar koneksi WebSocket tidak terputus.
+#   - --no-cpu-throttling digunakan agar performa real-time audio/video tetap konsisten.
+#   - --session-affinity membantu client tetap terhubung ke instance yang sama.
+#   - cloudbuild.yaml ini diasumsikan berada di direktori server/ dalam repo.
+#     Di Cloud Build Trigger, set "Build configuration file location" ke: server/cloudbuild.yaml
+# ============================================================
+
+steps:
+  # ==========================================================
+  # 1. Build Image
+  # dir: server → build context adalah folder server/ di root repo
+  # ==========================================================
+  - name: "gcr.io/cloud-builders/docker"
+    id: "build-moriesly-autocare-server"
+    dir: "server"
+    args:
+      - "build"
+      - "-t"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_ARTIFACT_REGISTRY_REPO}/${_SERVICE_NAME}:${SHORT_SHA}"
+      - "-t"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_ARTIFACT_REGISTRY_REPO}/${_SERVICE_NAME}:latest"
+      - "-f"
+      - "Dockerfile"
+      - "."
+
+  # ==========================================================
+  # 2. Push Image (kedua tag sekaligus: SHORT_SHA dan latest)
+  # ==========================================================
+  - name: "gcr.io/cloud-builders/docker"
+    id: "push-moriesly-autocare-server"
+    args:
+      - "push"
+      - "--all-tags"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_ARTIFACT_REGISTRY_REPO}/${_SERVICE_NAME}"
+
+  # ==========================================================
+  # 3. Deploy ke Cloud Run
+  # Konfigurasi dioptimalkan untuk WebSocket real-time (Gemini Live API)
+  # ==========================================================
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    id: "deploy-moriesly-autocare-server"
+    entrypoint: gcloud
+    args:
+      - "run"
+      - "deploy"
+      - "${_SERVICE_NAME}"
+      - "--image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_ARTIFACT_REGISTRY_REPO}/${_SERVICE_NAME}:${SHORT_SHA}"
+      - "--region=${_REGION}"
+      - "--platform=managed"
+      - "--allow-unauthenticated"
+      - "--memory=${_MEMORY}"
+      - "--cpu=${_CPU}"
+      - "--min-instances=${_MIN_INSTANCES}"
+      - "--max-instances=${_MAX_INSTANCES}"
+      - "--port=${_PORT}"
+      # Timeout maksimum Cloud Run (1 jam) agar WebSocket tidak terputus di tengah sesi
+      - "--timeout=3600"
+      # Tidak ada throttling CPU → performa konsisten untuk streaming audio/video real-time
+      - "--no-cpu-throttling"
+      # Session affinity → client tetap terhubung ke instance yang sama selama sesi WebSocket
+      - "--session-affinity"
+      # ^|^ → gunakan | sebagai pemisah env var agar koma dalam _FRONTEND_URLS tidak konflik
+      - "--set-env-vars=^|^NODE_ENV=${_NODE_ENV}|GEMINI_API_KEY=${_GEMINI_API_KEY}|FRONTEND_URLS=${_FRONTEND_URLS}"
+
+# Default Substitutions
+# Nilai ini bisa di-override langsung di halaman Cloud Build Trigger
+substitutions:
+  _REGION: "us-central1"
+  _ARTIFACT_REGISTRY_REPO: "websocket-live-agent"
+  _SERVICE_NAME: "moriesly-autocare-server"
+  _MEMORY: "512Mi"
+  _CPU: "1"
+  _MIN_INSTANCES: "0"
+  _MAX_INSTANCES: "3"
+  _PORT: ""
+  _NODE_ENV: "production"
+  _GEMINI_API_KEY: ""
+  _FRONTEND_URLS: ""
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: "E2_MEDIUM"
+
+images:
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_ARTIFACT_REGISTRY_REPO}/${_SERVICE_NAME}:${SHORT_SHA}"
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_ARTIFACT_REGISTRY_REPO}/${_SERVICE_NAME}:latest"

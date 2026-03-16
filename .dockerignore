@@ -1,0 +1,29 @@
+# Dependencies — tidak perlu disalin, akan di-install ulang saat build
+
+node_modules/
+
+# Output kompilasi TypeScript
+
+dist/
+
+# File environment — jangan pernah di-bake ke dalam image
+
+.env
+.env.\*
+!.env.example
+
+# File development & dokumentasi
+
+_.md
+_.log
+
+# Version control
+
+.git/
+.gitignore
+
+# Editor & OS artifacts
+
+.vscode/
+.DS_Store
+Thumbs.db

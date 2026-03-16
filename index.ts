@@ -8,22 +8,75 @@
 
 import "dotenv/config";
 import express from "express";
+import cors from "cors";
 import { createServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { GoogleGenAI, Type } from "@google/genai";
 import { GeminiSession } from "./geminiSession";
 import type { ClientMessage } from "./types/agentProtocol";
 
+// ─── CORS ────────────────────────────────────────────────────────────────────
+// FRONTEND_URLS diisi dengan origin yang diizinkan, dipisah koma.
+// Jika kosong (env dev), semua origin diizinkan.
+const allowedOrigins: string[] = process.env.FRONTEND_URLS
+  ? process.env.FRONTEND_URLS.split(",")
+      .map((o) => o.trim())
+      .filter(Boolean)
+  : [];
+
+function isDevLocalOrigin(origin?: string): boolean {
+  if (!origin || process.env.NODE_ENV === "production") return false;
+  try {
+    const { hostname } = new URL(origin);
+    return hostname === "localhost" || hostname === "127.0.0.1";
+  } catch {
+    return false;
+  }
+}
+
+function isOriginAllowed(origin?: string): boolean {
+  if (!origin) return allowedOrigins.length === 0;
+  if (allowedOrigins.length === 0) return true;
+  return allowedOrigins.includes(origin) || isDevLocalOrigin(origin);
+}
+
 const app = express();
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      callback(null, isOriginAllowed(origin));
+    },
+    methods: ["GET", "POST"],
+    allowedHeaders: ["Content-Type"],
+  }),
+);
 app.use(express.json({ limit: "10mb" }));
 const httpServer = createServer(app);
 
-// WebSocket server pada path /ws agar mudah diproxy oleh Vite
-const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
+// WebSocket server pada path /ws
+// verifyClient memvalidasi Origin agar hanya frontend yang terdaftar yang bisa connect
+const wss = new WebSocketServer({
+  server: httpServer,
+  path: "/ws",
+  verifyClient: ({ origin }, callback) => {
+    const allowed = isOriginAllowed(origin);
+    callback(
+      allowed,
+      allowed ? 200 : 403,
+      allowed ? "OK" : "Origin not allowed",
+    );
+  },
+});
 
-// Health check endpoint
+// ─── Health check ─────────────────────────────────────────────────────────────
+const startTime = Date.now();
 app.get("/health", (_req, res) =>
-  res.json({ ok: true, time: new Date().toISOString() }),
+  res.json({
+    ok: true,
+    time: new Date().toISOString(),
+    uptime: Math.floor((Date.now() - startTime) / 1000),
+    activeConnections: wss.clients.size,
+  }),
 );
 
 // ─── POST /api/scan ──────────────────────────────────────────────────────────
@@ -103,12 +156,12 @@ app.post("/api/health-plan", async (req, res) => {
     }
 
     const ai = new GoogleGenAI({ apiKey });
-    const prompt = `Generate a personalized health, skin, and diet recovery plan for a user.
+    const prompt = `Generate a personalized nutritional and diet recovery plan for a user.
 The user has consumed the following meals recently:
 ${mealLogs || "No meals logged yet. Assume a standard diet."}
 
-Based on this diet, create a plan that addresses potential skin issues (like inflammation or dehydration) and suggests dietary improvements.
-IMPORTANT: In the 'dietaryNotes' field, explicitly mention the specific food/drinks the user consumed and how they affect their health/skin.
+Based on this diet, create a plan that addresses their health and suggests dietary improvements.
+IMPORTANT: In the 'dietaryNotes' field, explicitly mention the specific food/drinks the user consumed and how they affect their overall health and energy levels.
 Return the result strictly as a JSON object matching the required schema.`;
 
     const response = await ai.models.generateContent({
@@ -119,7 +172,7 @@ Return the result strictly as a JSON object matching the required schema.`;
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            skinCondition: { type: Type.STRING },
+            healthSummary: { type: Type.STRING },
             dietaryNotes: { type: Type.STRING },
             morningRoutineTitle: { type: Type.STRING },
             morningRoutineDesc: { type: Type.STRING },
@@ -130,7 +183,7 @@ Return the result strictly as a JSON object matching the required schema.`;
             recommendedMedication: { type: Type.STRING },
           },
           required: [
-            "skinCondition",
+            "healthSummary",
             "dietaryNotes",
             "morningRoutineTitle",
             "morningRoutineDesc",
@@ -166,6 +219,9 @@ wss.on("connection", (ws: WebSocket) => {
 
       switch (msg.type) {
         case "start_session":
+          if (gemini) {
+            gemini.close();
+          }
           // Buat sesi Gemini baru untuk koneksi ini
           gemini = new GeminiSession(ws);
           await gemini.start(msg.mealLogs);
