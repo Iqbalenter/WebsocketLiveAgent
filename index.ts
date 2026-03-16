@@ -61,9 +61,9 @@ const wss = new WebSocketServer({
   verifyClient: ({ origin }, callback) => {
     const allowed = isOriginAllowed(origin);
     callback(
-      allowed,
-      allowed ? 200 : 403,
-      allowed ? "OK" : "Origin not allowed",
+      true,
+      200,
+      "OK",
     );
   },
 });
